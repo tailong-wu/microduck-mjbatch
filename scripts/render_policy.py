@@ -28,8 +28,15 @@ def main():
   ap.add_argument("--fps", type=int, default=50)
   ap.add_argument("--command", default="0.4,0,0", help="forward m/s, sideways m/s, yaw rad/s")
   ap.add_argument("--distance", type=float, default=0.8)
+  ap.add_argument(
+    "--model",
+    type=pathlib.Path,
+    default=pathlib.Path("microduck/scene_walk.xml"),
+    help="the full tree by default, so the shell renders",
+  )
   ap.add_argument("--width", type=int, default=640)
   ap.add_argument("--height", type=int, default=480)
+  ap.add_argument("--slowmo", type=float, default=1.0, help="encode this many times slower")
   args = ap.parse_args()
 
   checkpoint = torch.load(args.policy, map_location="cpu")
@@ -37,7 +44,10 @@ def main():
   net.load_state_dict(checkpoint["model"])
   net.eval()
 
-  model = T.build_model(checkpoint.get("timestep", T.TIMESTEP))
+  model = T.build_model(checkpoint.get("timestep", T.TIMESTEP), args.model)
+  # The offscreen framebuffer defaults to 640x480 whatever the model asks for; lift it for HD.
+  model.vis.global_.offwidth = max(args.width, model.vis.global_.offwidth)
+  model.vis.global_.offheight = max(args.height, model.vis.global_.offheight)
   data = mujoco.MjData(model)
   mujoco.mj_resetDataKeyframe(model, data, model.key("STAND").id)
   env = T.Duck(

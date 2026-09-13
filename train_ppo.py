@@ -22,7 +22,9 @@ import torch
 from mjbatch import Batch
 from torch import nn
 
-XML = pathlib.Path(__file__).parent / "microduck/scene_walk.xml"
+# The lean tree drops the visual mesh geoms: same physics, 2x the substep rate. Rendering uses the
+# full tree (scripts/render_policy.py --model microduck/scene_walk.xml).
+XML = pathlib.Path(__file__).parent / "microduck/lean/scene_walk.xml"
 
 # Control runs at 50 Hz. Upstream simulates at 500 Hz (mjlab's default timestep), which costs 10
 # physics substeps per action; mj_step calls, not simulated seconds, are what the CPU pays for, so
@@ -62,8 +64,8 @@ EPOCHS, MINIBATCHES, LOG_STD, HIDDEN, SEED = 5, 4, np.log(0.5), 128, 0
 OUT = pathlib.Path(__file__).parent / "microduck_policy.pt"
 
 
-def build_model(timestep=TIMESTEP):
-  spec = mujoco.MjSpec.from_file(str(XML))
+def build_model(timestep=TIMESTEP, path=XML):
+  spec = mujoco.MjSpec.from_file(str(path))
   spec.option.timestep = timestep
   for actuator in spec.actuators:
     actuator.set_to_position(kp=KP, kv=KD)

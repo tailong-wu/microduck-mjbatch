@@ -6,15 +6,22 @@ parallel through a C++ thread pool, GIL released, GPU idle.
 
 ```
 uv run train_ppo.py --num-envs 4096 --iterations 1500 --timestep 0.005
-uv run scripts/render_policy.py --policy microduck_policy.pt --command 0.4,0,0
+uv run scripts/render_policy.py --policy microduck_policy.pt --command 0.4,0,0 \
+    --width 1920 --height 1080 --out media/microduck_walk_1080p.mp4
 ```
 
-`microduck/` holds the robot MJCF, vendored from
-[pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl) (Apache-2.0) by
-`scripts/vendor_mjcf.py` — the complete model, 38 meshes (21 MB), so renders show the whole robot.
-`--strip-visual` drops the 75 visual mesh geoms (contype=0, conaffinity=0) for a 2.9 MB tree when
-only training matters; `scripts/check_vendored.py` asserts either tree takes a bit-identical
-trajectory to upstream over 200 steps of a control sweep.
+`scripts/vendor_mjcf.py` copies the robot MJCF out of a
+[pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl) checkout
+(Apache-2.0) into two trees:
+
+| tree | contents | who uses it |
+|---|---|---|
+| `microduck/` | complete model, 38 meshes, 21 MB | `scripts/render_policy.py` — renders the shell |
+| `microduck/lean/` | 75 visual mesh geoms dropped (contype=0), 4 meshes, 2.9 MB | `train_ppo.py` — **2× the substep rate** |
+
+Same physics either way: visual geoms never touch contact. Measured at 4096 envs, `--timestep
+0.005`: full tree 62k substeps/s, lean tree 119k. `scripts/check_vendored.py` asserts both trees
+take a bit-identical trajectory to upstream over 200 steps of a control sweep.
 
 ## Result: 4096 envs, 1500 iterations, 2 h 36 min, on 8 vCPU
 
@@ -26,7 +33,8 @@ Final iteration: reward **4.10**, `track 0.95`, `turn 0.79`, `falls 0.00`.
 | `0, 0, 0` | stands, 0.13 m drift over 8 s |
 | `0, 0, 0.8` | turns in place |
 
-`media/microduck_walk.mp4` is the trained policy at `0.4` m/s, rendered offscreen by
+`media/microduck_walk_1080p.mp4` (1920×1080, 50 fps) and `media/microduck_walk.mp4` (480p) are the
+trained policy at `0.4` m/s, rendered offscreen by
 `scripts/render_policy.py`. The checkpoint it renders, `microduck_policy.pt`, is in the repo. (The
 policy was trained on the `--strip-visual` tree, which steps identically — visual geoms are
 contype=0 — and is re-rendered here on the full model.)
@@ -64,11 +72,12 @@ posture, uprightness, height, vertical bounce, action rate, torque, joint limits
 
 ```
 train_ppo.py            model build, batched env, PPO, training loop
-microduck/              vendored MJCF (2 XML + 38 STL, 21 MB; --strip-visual for 2.9 MB)
+microduck/              vendored MJCF, full tree (2 XML + 38 STL, 21 MB)
+microduck/lean/         same model without the visual meshes (4 STL, 2.9 MB) — training uses this
 scripts/vendor_mjcf.py  re-vendor from a microduck_rl checkout
 scripts/check_vendored.py  prove the stripping changed no physics
 scripts/render_policy.py   offscreen mp4 of a checkpoint (no display on this box)
-media/microduck_walk.mp4   the trained gait
+media/microduck_walk*.mp4  the trained gait, 1080p and 480p
 ```
 
 CPU-only environment: `uv sync` (torch from the PyTorch CPU index).
