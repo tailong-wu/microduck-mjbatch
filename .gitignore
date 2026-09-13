@@ -1,4 +1,3 @@
 .venv/
-wandb/
-*.pt
 __pycache__/
+wandb/

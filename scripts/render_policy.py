@@ -27,24 +27,30 @@ def main():
   ap.add_argument("--seconds", type=float, default=6.0)
   ap.add_argument("--fps", type=int, default=50)
   ap.add_argument("--command", default="0.4,0,0", help="forward m/s, sideways m/s, yaw rad/s")
-  ap.add_argument("--width", type=int, default=960)
-  ap.add_argument("--height", type=int, default=540)
+  ap.add_argument("--distance", type=float, default=0.8)
+  ap.add_argument("--width", type=int, default=640)
+  ap.add_argument("--height", type=int, default=480)
   args = ap.parse_args()
 
-  model = T.build_model()
-  data = mujoco.MjData(model)
-  mujoco.mj_resetDataKeyframe(model, data, model.key("STAND").id)
+  checkpoint = torch.load(args.policy, map_location="cpu")
   net = T.ActorCritic()
-  net.load_state_dict(torch.load(args.policy, map_location="cpu")["model"])
+  net.load_state_dict(checkpoint["model"])
   net.eval()
 
-  env = T.Duck(1)  # for obs()/step() bookkeeping only; the frame comes from `data`
+  model = T.build_model(checkpoint.get("timestep", T.TIMESTEP))
+  data = mujoco.MjData(model)
+  mujoco.mj_resetDataKeyframe(model, data, model.key("STAND").id)
+  env = T.Duck(
+    1, timestep=checkpoint.get("timestep", T.TIMESTEP)
+  )  # obs/step bookkeeping; frames come from `data`
   command = np.array([float(v) for v in args.command.split(",")], np.float32)
   env.command[:], env.until[:] = command, 1e9
 
   camera = mujoco.MjvCamera()
   mujoco.mjv_defaultFreeCamera(model, camera)
-  camera.distance, camera.elevation, camera.azimuth, camera.lookat[:] = 1.1, -12, 135, (0, 0, 0.12)
+  camera.distance, camera.elevation, camera.azimuth = args.distance, -10, 130
+  option = mujoco.MjvOption()
+  option.geomgroup[:] = 1  # the vendored model keeps only the collision group, which is hidden by default
   renderer = mujoco.Renderer(model, height=args.height, width=args.width)
 
   frames = []
@@ -55,7 +61,8 @@ def main():
     env.step(action[None])
     data.qpos[:], data.qvel[:] = env.qpos[0], env.qvel[0]
     mujoco.mj_forward(model, data)
-    renderer.update_scene(data, camera=camera)
+    camera.lookat[:] = data.qpos[:3]  # follow the duck, or it walks out of frame
+    renderer.update_scene(data, camera=camera, scene_option=option)
     frames.append(renderer.render())
 
   subprocess.run(

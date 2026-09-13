@@ -15,6 +15,20 @@ uv run scripts/render_policy.py --policy microduck_policy.pt --command 0.4,0,0
 conaffinity=0) and keeps the 4 meshes that actually collide. `scripts/check_vendored.py` asserts
 the stripped model takes a bit-identical trajectory over 200 steps of a control sweep.
 
+## Result: 4096 envs, 1500 iterations, 2 h 36 min, on 8 vCPU
+
+Final iteration: reward **4.10**, `track 0.95`, `turn 0.79`, `falls 0.00`.
+
+| command (m/s, m/s, rad/s) | measured |
+|---|---|
+| `0.3, 0, 0` | 0.21 m/s forward, steady (median \|v\| 0.218, no falls over 5 s) |
+| `0, 0, 0` | stands, 0.13 m drift over 8 s |
+| `0, 0, 0.8` | turns in place |
+
+`media/microduck_walk.mp4` is the trained policy at `0.4` m/s, rendered offscreen by
+`scripts/render_policy.py`. The checkpoint it renders, `microduck_policy.pt`, is in the repo.
+End-to-end throughput of that run: 16k env-steps/s, i.e. 6.26 s per iteration.
+
 ## Measured on 8 vCPU (RTX 2080 Ti present but unused)
 
 Per PPO iteration at 4096 envs × 24 steps (98 304 env-steps):
