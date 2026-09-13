@@ -8,6 +8,7 @@ parallel through a C++ thread pool, GIL released, GPU idle.
 uv run train_ppo.py --num-envs 4096 --iterations 1500 --timestep 0.005
 uv run scripts/render_policy.py --policy microduck_policy.pt --command 0.4,0,0 \
     --width 1920 --height 1080 --out media/microduck_walk_1080p.mp4
+# --substeps 4 --slowmo 8 renders every substep and plays it back 8x slower
 ```
 
 `scripts/vendor_mjcf.py` copies the robot MJCF out of a
@@ -33,8 +34,10 @@ Final iteration: reward **4.10**, `track 0.95`, `turn 0.79`, `falls 0.00`.
 | `0, 0, 0` | stands, 0.13 m drift over 8 s |
 | `0, 0, 0.8` | turns in place |
 
-`media/microduck_walk_1080p.mp4` (1920×1080, 50 fps) and `media/microduck_walk.mp4` (480p) are the
-trained policy at `0.4` m/s, rendered offscreen by
+`media/microduck_walk_1080p.mp4` (1920×1080, 50 fps), `media/microduck_walk.mp4` (480p) and
+`media/microduck_walk_slowmo_1080p.mp4` (4 s of simulation rendered at every physics substep —
+800 frames — played at 25 fps, i.e. 8× slow motion) are the trained policy at `0.4` m/s, rendered
+offscreen by
 `scripts/render_policy.py`. The checkpoint it renders, `microduck_policy.pt`, is in the repo. (The
 policy was trained on the `--strip-visual` tree, which steps identically — visual geoms are
 contype=0 — and is re-rendered here on the full model.)
@@ -77,7 +80,7 @@ microduck/lean/         same model without the visual meshes (4 STL, 2.9 MB) —
 scripts/vendor_mjcf.py  re-vendor from a microduck_rl checkout
 scripts/check_vendored.py  prove the stripping changed no physics
 scripts/render_policy.py   offscreen mp4 of a checkpoint (no display on this box)
-media/microduck_walk*.mp4  the trained gait, 1080p and 480p
+media/microduck_walk*.mp4  the trained gait: 480p, 1080p, 1080p slow motion
 ```
 
 CPU-only environment: `uv sync` (torch from the PyTorch CPU index).

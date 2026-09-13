@@ -4,7 +4,9 @@
 
   uv run scripts/render_policy.py --policy microduck_policy.pt --seconds 6 --command 0.4,0,0
 
-Feeds a fixed velocity command, steps the single MuJoCo instance, and pipes rgb frames to ffmpeg.
+Feeds a fixed velocity command, steps the batch, and pipes rgb frames to ffmpeg. `--substeps 4`
+renders every physics substep instead of every action, which is what makes a real slow motion:
+more frames of the trajectory, not the same frames re-timed.
 """
 
 import argparse
@@ -25,7 +27,9 @@ def main():
   ap.add_argument("--policy", type=pathlib.Path, default=T.OUT)
   ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("microduck_walk.mp4"))
   ap.add_argument("--seconds", type=float, default=6.0)
-  ap.add_argument("--fps", type=int, default=50)
+  ap.add_argument("--fps", type=int, default=50, help="control rate; the action is applied this often")
+  ap.add_argument("--substeps", type=int, default=1, help="frames rendered per control step")
+  ap.add_argument("--slowmo", type=float, default=1.0, help="playback slowdown factor")
   ap.add_argument("--command", default="0.4,0,0", help="forward m/s, sideways m/s, yaw rad/s")
   ap.add_argument("--distance", type=float, default=0.8)
   ap.add_argument(
@@ -36,25 +40,23 @@ def main():
   )
   ap.add_argument("--width", type=int, default=640)
   ap.add_argument("--height", type=int, default=480)
-  ap.add_argument("--slowmo", type=float, default=1.0, help="encode this many times slower")
   args = ap.parse_args()
 
   checkpoint = torch.load(args.policy, map_location="cpu")
+  timestep = checkpoint.get("timestep", T.TIMESTEP)
   net = T.ActorCritic()
   net.load_state_dict(checkpoint["model"])
   net.eval()
 
-  model = T.build_model(checkpoint.get("timestep", T.TIMESTEP), args.model)
+  model = T.build_model(timestep, args.model)
   # The offscreen framebuffer defaults to 640x480 whatever the model asks for; lift it for HD.
   model.vis.global_.offwidth = max(args.width, model.vis.global_.offwidth)
   model.vis.global_.offheight = max(args.height, model.vis.global_.offheight)
   data = mujoco.MjData(model)
+
+  env = T.Duck(1, timestep=timestep)  # obs/step bookkeeping; the rendered state comes from here
   mujoco.mj_resetDataKeyframe(model, data, model.key("STAND").id)
-  env = T.Duck(
-    1, timestep=checkpoint.get("timestep", T.TIMESTEP)
-  )  # obs/step bookkeeping; frames come from `data`
-  command = np.array([float(v) for v in args.command.split(",")], np.float32)
-  env.command[:], env.until[:] = command, 1e9
+  env.command[:], env.until[:] = [float(v) for v in args.command.split(",")], 1e9
 
   camera = mujoco.MjvCamera()
   mujoco.mjv_defaultFreeCamera(model, camera)
@@ -64,17 +66,43 @@ def main():
   renderer = mujoco.Renderer(model, height=args.height, width=args.width)
 
   frames = []
-  for _ in range(int(args.seconds * args.fps)):
-    with torch.no_grad():
-      action = net(torch.as_tensor(env.obs()))[0].numpy()[0]
-    env.until[:] = 1e9  # hold the command for the whole clip
-    env.step(action[None])
+
+  def shoot():
     data.qpos[:], data.qvel[:] = env.qpos[0], env.qvel[0]
-    mujoco.mj_forward(model, data)
     camera.lookat[:] = data.qpos[:3]  # follow the duck, or it walks out of frame
+    mujoco.mj_forward(model, data)
     renderer.update_scene(data, camera=camera, scene_option=option)
     frames.append(renderer.render())
 
+  def act():
+    with torch.no_grad():
+      action = net(torch.as_tensor(env.obs()))[0].numpy()[0]
+    env.until[:] = 1e9  # hold the command for the whole clip
+    env.ctrl[:] = env.stand + T.ACTION_SCALE * action
+    return action
+
+  steps = int(args.seconds * args.fps)
+  if args.substeps <= 1:
+    for _ in range(steps):
+      action = act()
+      env.batch.step(nstep=env.decimation)
+      env.steps += 1
+      env.clock = (env.clock + T.GAIT_HZ * T.CTRL_DT) % 1.0
+      env.action = action[None].astype(np.float32)
+      shoot()
+  else:  # step the batch itself, sub-step by sub-step, so every rendered frame is a real state
+    chunk = env.decimation // args.substeps
+    assert chunk * args.substeps == env.decimation, "substeps must divide the decimation"
+    for _ in range(steps):
+      action = act()
+      for _ in range(args.substeps):
+        env.batch.step(nstep=chunk)
+        shoot()
+      env.steps += 1
+      env.clock = (env.clock + T.GAIT_HZ * T.CTRL_DT) % 1.0
+      env.action = action[None].astype(np.float32)
+
+  out_fps = args.fps * max(args.substeps, 1) / args.slowmo
   subprocess.run(
     [
       "ffmpeg",
@@ -88,17 +116,22 @@ def main():
       "-s",
       f"{args.width}x{args.height}",
       "-r",
-      str(args.fps),
+      str(out_fps),
       "-i",
       "-",
       "-pix_fmt",
       "yuv420p",
+      "-crf",
+      "18",
       str(args.out),
     ],
     input=b"".join(f.tobytes() for f in frames),
     check=True,
   )
-  print(f"wrote {args.out} ({len(frames)} frames)")
+  print(
+    f"wrote {args.out} ({len(frames)} frames at {out_fps:g} fps, "
+    f"{len(frames) / out_fps:.1f} s of video for {args.seconds:g} s of simulation)"
+  )
 
 
 if __name__ == "__main__":
