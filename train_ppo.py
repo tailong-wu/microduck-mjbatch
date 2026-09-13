@@ -13,16 +13,14 @@ no domain randomization, no symmetry constraint.
 """
 
 import argparse
-import os
 import pathlib
 import time
 
 import mujoco
 import numpy as np
 import torch
-from torch import nn
-
 from mjbatch import Batch
+from torch import nn
 
 XML = pathlib.Path(__file__).parent / "microduck/scene_walk.xml"
 

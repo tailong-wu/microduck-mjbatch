@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
-import train_ppo as T  # noqa: E402  (the repo's own config and network definition)
+import train_ppo as T  # the repo's own config and network definition
 
 
 def main():
