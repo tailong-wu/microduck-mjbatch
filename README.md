@@ -11,9 +11,10 @@ uv run scripts/render_policy.py --policy microduck_policy.pt --command 0.4,0,0
 
 `microduck/` holds the robot MJCF, vendored from
 [pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl) (Apache-2.0) by
-`scripts/vendor_mjcf.py`, which strips the 76 visual mesh geoms (23 MB of STLs, contype=0,
-conaffinity=0) and keeps the 4 meshes that actually collide. `scripts/check_vendored.py` asserts
-the stripped model takes a bit-identical trajectory over 200 steps of a control sweep.
+`scripts/vendor_mjcf.py` — the complete model, 38 meshes (21 MB), so renders show the whole robot.
+`--strip-visual` drops the 75 visual mesh geoms (contype=0, conaffinity=0) for a 2.9 MB tree when
+only training matters; `scripts/check_vendored.py` asserts either tree takes a bit-identical
+trajectory to upstream over 200 steps of a control sweep.
 
 ## Result: 4096 envs, 1500 iterations, 2 h 36 min, on 8 vCPU
 
@@ -26,7 +27,9 @@ Final iteration: reward **4.10**, `track 0.95`, `turn 0.79`, `falls 0.00`.
 | `0, 0, 0.8` | turns in place |
 
 `media/microduck_walk.mp4` is the trained policy at `0.4` m/s, rendered offscreen by
-`scripts/render_policy.py`. The checkpoint it renders, `microduck_policy.pt`, is in the repo.
+`scripts/render_policy.py`. The checkpoint it renders, `microduck_policy.pt`, is in the repo. (The
+policy was trained on the `--strip-visual` tree, which steps identically — visual geoms are
+contype=0 — and is re-rendered here on the full model.)
 End-to-end throughput of that run: 16k env-steps/s, i.e. 6.26 s per iteration.
 
 ## Measured on 8 vCPU (RTX 2080 Ti present but unused)
@@ -61,10 +64,11 @@ posture, uprightness, height, vertical bounce, action rate, torque, joint limits
 
 ```
 train_ppo.py            model build, batched env, PPO, training loop
-microduck/              vendored MJCF (2 XML + 4 STL, 2.9 MB)
+microduck/              vendored MJCF (2 XML + 38 STL, 21 MB; --strip-visual for 2.9 MB)
 scripts/vendor_mjcf.py  re-vendor from a microduck_rl checkout
 scripts/check_vendored.py  prove the stripping changed no physics
 scripts/render_policy.py   offscreen mp4 of a checkpoint (no display on this box)
+media/microduck_walk.mp4   the trained gait
 ```
 
 CPU-only environment: `uv sync` (torch from the PyTorch CPU index).

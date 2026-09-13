@@ -50,7 +50,7 @@ def main():
   mujoco.mjv_defaultFreeCamera(model, camera)
   camera.distance, camera.elevation, camera.azimuth = args.distance, -10, 130
   option = mujoco.MjvOption()
-  option.geomgroup[:] = 1  # the vendored model keeps only the collision group, which is hidden by default
+  option.geomgroup[:] = [1, 1, 1, 0, 1, 1]  # draw the shell (group 2), hide the green collision geoms (3)
   renderer = mujoco.Renderer(model, height=args.height, width=args.width)
 
   frames = []

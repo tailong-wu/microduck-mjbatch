@@ -40,11 +40,12 @@ def main():
   assert (a.nq, a.nv, a.nu) == (b.nq, b.nv, b.nu), (
     f"model sizes differ: {a.nq, a.nv, a.nu} vs {b.nq, b.nv, b.nu}"
   )
-  assert a.ngeom > b.ngeom, "vendor script kept every geom — visual stripping did nothing"
+  assert a.ngeom >= b.ngeom, "the vendored model has geoms upstream does not"
   for field in ("qpos", "qvel", "ctrl"):
     x, y = getattr(da, field), getattr(db, field)
     assert np.allclose(x, y), f"{field} diverged by {np.abs(x - y).max():.3g}"
   print(f"ok: {a.ngeom} geoms upstream -> {b.ngeom} vendored, trajectories match over 200 steps")
+  print(f"    stripped visual geoms: {a.ngeom - b.ngeom}")
   print(f"    qpos max |diff| {np.abs(da.qpos - db.qpos).max():.3g}")
 
 
