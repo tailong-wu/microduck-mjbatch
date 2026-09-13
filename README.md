@@ -1,48 +1,56 @@
 # microduck-mjbatch
 
 Train the [Pollen Microduck](https://github.com/pollen-robotics/microduck) — a ~800 g, ~25 cm
-biped — with [mjbatch](https://github.com/kevinzakka/mjbatch): thousands of MuJoCo instances
-stepped in parallel on the CPU through a C++ thread pool, GIL released. No CUDA, no GPU.
+biped — with [mjbatch](https://github.com/kevinzakka/mjbatch): 4096 MuJoCo instances stepped in
+parallel through a C++ thread pool, GIL released, GPU idle.
 
-Upstream [pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl) does the
-same task on [mjlab](https://github.com/mujocolab/mjlab) (MuJoCo Warp), which requires a CUDA GPU.
-Microduck is small enough (21 qpos, 14 actuators, 76 geoms) that CPU batching is competitive with
-a single GPU, so this repo ports the training loop to mjbatch.
+```
+uv run train_ppo.py --num-envs 4096 --iterations 1500 --timestep 0.005
+uv run scripts/render_policy.py --policy microduck_policy.pt --command 0.4,0,0
+```
 
-## Status
+`microduck/` holds the robot MJCF, vendored from
+[pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl) (Apache-2.0) by
+`scripts/vendor_mjcf.py`, which strips the 76 visual mesh geoms (23 MB of STLs, contype=0,
+conaffinity=0) and keeps the 4 meshes that actually collide. `scripts/check_vendored.py` asserts
+the stripped model takes a bit-identical trajectory over 200 steps of a control sweep.
 
-Feasibility checked, trainer not written yet.
+## Measured on 8 vCPU (RTX 2080 Ti present but unused)
 
-- `scene_walk.xml` loads in plain CPU MuJoCo — the actuators are stock `<position>` actuators, and
-  upstream's BAM actuator models are a Python package, not a MuJoCo plugin, so nothing blocks a
-  CPU port
-- **54 400 sim-steps/s** for 4096 instances on 8 vCPU (`mjbatch.Batch`, 100 steps each)
+Per PPO iteration at 4096 envs × 24 steps (98 304 env-steps):
 
-For reference, the same robot on the same box through mjlab + RTX 2080 Ti measured 3.1–3.3 s per
-PPO iteration at 4096 envs ≈ **30 000 env-steps/s end to end** (physics + rollout + update). The
-two numbers are not the same metric: one is bare physics, the other a full training iteration.
+| | rollout | GAE | update | total |
+|---|---|---|---|---|
+| `--timestep 0.002` (500 Hz, 10 substeps/action) | 9.14 s | 0.001 s | 2.26 s | 11.4 s |
+| `--timestep 0.005` (200 Hz, 4 substeps/action) | | | | **6.1 s** |
 
-## Plan
+mj_step calls — not simulated seconds — are what the CPU pays for: 110 000 substeps/s either way.
+So the physics timestep is a throughput knob, and `0.005` buys 2.5× for a coarser contact
+resolution. The policy still runs at 50 Hz in both cases. 1500 iterations at 0.005 ≈ 2.5 h.
 
-1. Vendor the Microduck MJCF from `microduck_rl` (Apache-2.0, attribution kept) and load it
-   through `mjbatch.Batch`.
-2. Write a single-file PPO trainer in the shape of mjbatch's own
-   [`examples/go1_joystick.py`](https://github.com/kevinzakka/mjbatch/blob/main/examples/go1_joystick.py):
-   velocity-command tracking, upright/pose cost, action-rate and torque penalties, gait-phase
-   reward, GAE, clipped PPO.
-3. Skip v0: BAM actuator physics, backlash, domain randomization — add once a gait exists.
-4. Render the gait offscreen (`mujoco.Renderer` + ffmpeg, no display on this box) and record the
-   CPU-vs-GPU comparison in this file.
+## What this does not model (yet)
+
+Upstream trains against a much richer plant. Missing here, in the order that matters:
+
+1. BAM actuator models — real motor dynamics replace the plain `kp=5, kv=0.3` PD, and the torque
+   ceiling is the real one, ±0.96 N·m
+2. Backlash and the joint encoder bias
+3. Domain randomization (friction, mass, latency)
+4. The symmetry constraint that upstream uses to prevent a limping gait
+
+The observation is the standard velocity-tracking layout: body-frame linear velocity, body-frame
+angular velocity, projected gravity, joint positions and velocities, last action, command, and a
+two-phase gait clock (56 dims). Reward: velocity and yaw-rate tracking, foot-lift gait shaping,
+posture, uprightness, height, vertical bounce, action rate, torque, joint limits.
 
 ## Layout
 
 ```
-microduck/     vendored MJCF + meshes from microduck_rl
-docs/          notes on the observation and reward layout being ported
-logs/          run logs from the mjlab baseline and, later, this trainer
+train_ppo.py            model build, batched env, PPO, training loop
+microduck/              vendored MJCF (2 XML + 4 STL, 2.9 MB)
+scripts/vendor_mjcf.py  re-vendor from a microduck_rl checkout
+scripts/check_vendored.py  prove the stripping changed no physics
+scripts/render_policy.py   offscreen mp4 of a checkpoint (no display on this box)
 ```
 
-## Environment
-
-Python 3.13, `mujoco==3.11.0` (CPU), `mjbatch`, `numpy`, `torch` (CPU is enough) — see
-`pyproject.toml`. Verified on 8 vCPU / RTX 2080 Ti, where the GPU is unused by this repo.
+CPU-only environment: `uv sync` (torch from the PyTorch CPU index).

@@ -1,0 +1,30 @@
+[project]
+name = "microduck-mjbatch"
+version = "0.1.0"
+description = "Train the Pollen Microduck with mjbatch: CPU-batched MuJoCo PPO, no GPU required"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+  "mujoco>=3.7",
+  "numpy",
+  "torch>=2.7",
+  "mjbatch @ git+https://github.com/kevinzakka/mjbatch",
+]
+
+[dependency-groups]
+dev = ["ruff"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.ruff]
+indent-width = 2
+line-length = 110
+exclude = ["microduck"]
+src = ["scripts", "train_ppo.py"]
