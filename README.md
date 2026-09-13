@@ -1,55 +1,48 @@
-# microduck-bench
+# microduck-mjbatch
 
-Training rig notes and results for [Microduck](https://github.com/pollen-robotics/microduck) RL
-policies, built on [pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl)
-(mjlab / MuJoCo Warp + PPO).
+Train the [Pollen Microduck](https://github.com/pollen-robotics/microduck) — a ~800 g, ~25 cm
+biped — with [mjbatch](https://github.com/kevinzakka/mjbatch): thousands of MuJoCo instances
+stepped in parallel on the CPU through a C++ thread pool, GIL released. No CUDA, no GPU.
 
-This repo is the measurement layer around that upstream project: what one specific box actually
-does, so the next run does not have to rediscover it.
-
-## The box
-
-| | |
-|---|---|
-| CPU | 8 vCPU (shared with a Celery worker and a Uvicorn app) |
-| GPU | NVIDIA GeForce RTX 2080 Ti, 11 GB, sm_75 |
-| Stack | Python 3.12, mjlab 1.3.0, warp-lang 1.12.0, torch 2.9.1+cu128 |
-
-## Measured throughput
-
-`Mjlab-Velocity-Flat-MicroDuck`, default PPO config, `num_steps_per_env=24`:
-
-| num-envs | s / iteration | env-steps/s | notes |
-|---|---|---|---|
-| 4096 | 3.10–3.29 | ~30k | 5.2 GB VRAM, GPU util 73% — **use this** |
-| 8192 | 8.17 | ~24k | >11 GB VRAM, spills to host; slower per step |
-
-- 20 000 iterations at 4096 envs ≈ **18.3 h**. The upstream default is 50 000.
-- Checkpoints land in `logs/rsl_rl/velocity/*/model_*.pt` every 250 iterations.
-- The GPU is the bottleneck, not the CPU: raising env count past what fits in VRAM loses.
-
-## Commands
-
-```bash
-git clone https://github.com/pollen-robotics/microduck_rl && cd microduck_rl
-UV_HTTP_TIMEOUT=600 uv sync
-
-# smoke test first — catches ~95% of config errors in seconds
-WANDB_MODE=offline uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 64 --agent.max-iterations 5
-
-# the run this repo records
-WANDB_MODE=offline uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max-iterations 20000
-
-# offscreen video of a checkpoint: mjlab renders with rgb_array, no display needed
-uv run play Mjlab-Velocity-Flat-MicroDuck --checkpoint logs/rsl_rl/velocity/<run>/model_<n>.pt --video
-```
-
-`WANDB_MODE=offline` keeps runs local; `wandb sync wandb/offline-run-*` uploads later if wanted.
-No display is available on this box, so the interactive viewer path is out — use `--video`.
+Upstream [pollen-robotics/microduck_rl](https://github.com/pollen-robotics/microduck_rl) does the
+same task on [mjlab](https://github.com/mujocolab/mjlab) (MuJoCo Warp), which requires a CUDA GPU.
+Microduck is small enough (21 qpos, 14 actuators, 76 geoms) that CPU batching is competitive with
+a single GPU, so this repo ports the training loop to mjbatch.
 
 ## Status
 
-- 2026-09-13: training started, `max_iterations=20000`. Progress log: `logs/train-microduck-velocity.log`.
-- Artifacts (policy checkpoints, gait videos) get added here as they land.
+Feasibility checked, trainer not written yet.
 
-Upstream `microduck_rl` is Apache-2.0; this repo only holds measurements and scripts.
+- `scene_walk.xml` loads in plain CPU MuJoCo — the actuators are stock `<position>` actuators, and
+  upstream's BAM actuator models are a Python package, not a MuJoCo plugin, so nothing blocks a
+  CPU port
+- **54 400 sim-steps/s** for 4096 instances on 8 vCPU (`mjbatch.Batch`, 100 steps each)
+
+For reference, the same robot on the same box through mjlab + RTX 2080 Ti measured 3.1–3.3 s per
+PPO iteration at 4096 envs ≈ **30 000 env-steps/s end to end** (physics + rollout + update). The
+two numbers are not the same metric: one is bare physics, the other a full training iteration.
+
+## Plan
+
+1. Vendor the Microduck MJCF from `microduck_rl` (Apache-2.0, attribution kept) and load it
+   through `mjbatch.Batch`.
+2. Write a single-file PPO trainer in the shape of mjbatch's own
+   [`examples/go1_joystick.py`](https://github.com/kevinzakka/mjbatch/blob/main/examples/go1_joystick.py):
+   velocity-command tracking, upright/pose cost, action-rate and torque penalties, gait-phase
+   reward, GAE, clipped PPO.
+3. Skip v0: BAM actuator physics, backlash, domain randomization — add once a gait exists.
+4. Render the gait offscreen (`mujoco.Renderer` + ffmpeg, no display on this box) and record the
+   CPU-vs-GPU comparison in this file.
+
+## Layout
+
+```
+microduck/     vendored MJCF + meshes from microduck_rl
+docs/          notes on the observation and reward layout being ported
+logs/          run logs from the mjlab baseline and, later, this trainer
+```
+
+## Environment
+
+Python 3.13, `mujoco==3.11.0` (CPU), `mjbatch`, `numpy`, `torch` (CPU is enough) — see
+`pyproject.toml`. Verified on 8 vCPU / RTX 2080 Ti, where the GPU is unused by this repo.
