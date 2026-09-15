@@ -4,7 +4,9 @@ Train the [Pollen Microduck](https://github.com/pollen-robotics/microduck) — a
 biped — with [mjbatch](https://github.com/kevinzakka/mjbatch): thousands of MuJoCo instances
 stepped in parallel on the CPU through a C++ thread pool, GIL released. No CUDA, no GPU.
 
-![Microduck walking](media/microduck_walk.gif)
+| walking | balancing on a ball |
+|---|---|
+| ![Microduck walking](media/microduck_walk.gif) | ![Microduck balancing](media/microduck_ball.gif) |
 
 ## Quickstart
 
@@ -21,10 +23,24 @@ Both tasks on 8 vCPU — the RTX 2080 Ti in this box was never used.
 | task | command | wall clock | policy | video |
 |---|---|---|---|---|
 | `velocity` | `--num-envs 4096 --iterations 1500` | **2 h 36 min** | `microduck_policy.pt` | `media/microduck_walk_1080p.mp4`, [slow motion](media/microduck_walk_slowmo_1080p.mp4) |
-| `ball-balance` | `--num-envs 4096 --iterations 800` | in flight (~1 h 30 min) | `microduck_ball_policy.pt` | to come |
+| `ball-balance` | `--num-envs 4096 --iterations 800` | **1 h 29 min** | `microduck_ball_policy.pt` | `media/microduck_ball.mp4` |
 
-`velocity`: final reward 4.10, velocity tracking 0.95, zero falls. Asked for 0.3 m/s it walks
-0.21 m/s steadily; asked for nothing it stands; asked to turn it turns in place.
+**`velocity`: solved.** Final reward 4.10, velocity tracking 0.95, zero falls. Asked for 0.3 m/s it
+walks 0.21 m/s steadily; asked for nothing it stands; asked to turn it turns in place.
+
+**`ball-balance`: half-solved, reported as is.** Final reward 6.09 — upright 0.97, height 0.98, but
+the ball term only 0.28 and 78 % of episodes still end in a fall. Deterministic evaluation, 64
+episodes, 10 s cap:
+
+| | median survival | mean | longest | mean ball offset |
+|---|---|---|---|---|
+| hold the stand pose | 0.60 s | 0.64 s | 1.22 s | — |
+| trained policy | **2.03 s** | 4.12 s | 10.00 s (cap) | 5.1 cm |
+
+So it learns to stand on the ball and to catch it for a few seconds, not to keep it. The clip above
+is a lucky episode. Likely causes, untested: 800 iterations is short (upstream config asks for
+20 000), the plain `kp=5` PD is slow at the ankle compared with the real motor model, and the ball
+carries 0.45 kg against a 0.74 kg duck.
 
 Throughput per PPO iteration (4096 envs × 24 steps = 98 304 env-steps): 6.3 s, of which 5.0 s is
 rollout and 1.2 s the update. End to end: 16k env-steps/s.
@@ -88,7 +104,7 @@ microduck/lean/            same model without the visual meshes (4 STL) — trai
 scripts/vendor_mjcf.py     re-vendor from a microduck_rl checkout
 scripts/check_vendored.py  prove the stripping changed no physics
 scripts/render_policy.py   offscreen mp4 (or gif) of a checkpoint; --substeps for slow motion
-media/                     the trained gaits: gif, 480p, 1080p, 1080p slow motion
+media/                     the trained gaits: gifs, 480p, 1080p, 1080p slow motion
 ```
 
 CPU-only environment: `uv sync` (torch from the PyTorch CPU index).

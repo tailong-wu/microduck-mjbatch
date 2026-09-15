@@ -31,7 +31,7 @@ def main():
   ap.add_argument("--substeps", type=int, default=1, help="frames rendered per control step")
   ap.add_argument("--slowmo", type=float, default=1.0, help="playback slowdown factor")
   ap.add_argument("--command", default="0.4,0,0", help="forward m/s, sideways m/s, yaw rad/s")
-  ap.add_argument("--distance", type=float, default=0.8)
+  ap.add_argument("--distance", type=float, default=None)
   ap.add_argument(
     "--model",
     type=pathlib.Path,
@@ -44,23 +44,36 @@ def main():
 
   checkpoint = torch.load(args.policy, map_location="cpu")
   timestep = checkpoint.get("timestep", T.TIMESTEP)
-  net = T.ActorCritic()
+  net = T.ActorCritic(checkpoint.get("obs_dim", T.OBS_DIM))
   net.load_state_dict(checkpoint["model"])
   net.eval()
 
-  model = T.build_model(timestep, args.model)
+  task = checkpoint.get("task", "velocity")
+  model = (
+    T.build_ball_model(timestep, args.model or T.BALL_XML_FULL)
+    if task == "ball-balance"
+    else T.build_model(timestep, args.model or T.XML)
+  )
   # The offscreen framebuffer defaults to 640x480 whatever the model asks for; lift it for HD.
   model.vis.global_.offwidth = max(args.width, model.vis.global_.offwidth)
   model.vis.global_.offheight = max(args.height, model.vis.global_.offheight)
   data = mujoco.MjData(model)
 
-  env = T.Duck(1, timestep=timestep)  # obs/step bookkeeping; the rendered state comes from here
-  mujoco.mj_resetDataKeyframe(model, data, model.key("STAND").id)
+  # obs/step bookkeeping; the rendered state comes from here
+  env = (
+    T.BallBalance(1, timestep=timestep, full=True) if task == "ball-balance" else T.Duck(1, timestep=timestep)
+  )
+  if task == "ball-balance":
+    data.qpos[:], data.qvel[:] = env.qpos[0], env.qvel[0]
+  else:
+    mujoco.mj_resetDataKeyframe(model, data, model.key("STAND").id)
   env.command[:], env.until[:] = [float(v) for v in args.command.split(",")], 1e9
 
   camera = mujoco.MjvCamera()
   mujoco.mjv_defaultFreeCamera(model, camera)
+  args.distance = args.distance if args.distance is not None else (1.0 if task == "ball-balance" else 0.8)
   camera.distance, camera.elevation, camera.azimuth = args.distance, -10, 130
+  camera.lookat[:] = (0.0, 0.0, 0.35) if task == "ball-balance" else (0.0, 0.0, 0.12)
   option = mujoco.MjvOption()
   option.geomgroup[:] = [1, 1, 1, 0, 1, 1]  # draw the shell (group 2), hide the green collision geoms (3)
   renderer = mujoco.Renderer(model, height=args.height, width=args.width)
@@ -69,7 +82,7 @@ def main():
 
   def shoot():
     data.qpos[:], data.qvel[:] = env.qpos[0], env.qvel[0]
-    camera.lookat[:] = data.qpos[:3]  # follow the duck, or it walks out of frame
+    camera.lookat[:] = data.qpos[:3] + [0, 0, 0.1]  # follow the duck, or it leaves the frame
     mujoco.mj_forward(model, data)
     renderer.update_scene(data, camera=camera, scene_option=option)
     frames.append(renderer.render())
@@ -84,11 +97,7 @@ def main():
   steps = int(args.seconds * args.fps)
   if args.substeps <= 1:
     for _ in range(steps):
-      action = act()
-      env.batch.step(nstep=env.decimation)
-      env.steps += 1
-      env.clock = (env.clock + T.GAIT_HZ * T.CTRL_DT) % 1.0
-      env.action = action[None].astype(np.float32)
+      env.step(act()[None])
       shoot()
   else:  # step the batch itself, sub-step by sub-step, so every rendered frame is a real state
     chunk = env.decimation // args.substeps
