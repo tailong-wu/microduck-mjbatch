@@ -58,20 +58,68 @@ REWARD = dict(
 )
 
 OBS_DIM, ACT_DIM = 3 + 3 + 3 + 3 * 14 + 3 + 2, 14
+
+# Ball balance — a port of Motphys MotrixLab's microduck-ball-balance task: the duck stands on a
+# basketball and holds it under its feet. Ball numbers come from that task's basketball.xml.
+BALL_RADIUS, BALL_MASS = 0.14, 0.45
+BALL_XML = pathlib.Path(__file__).parent / "microduck/lean/scene_walk.xml"
+BALL_XML_FULL = pathlib.Path(__file__).parent / "microduck/scene_walk.xml"
+BASE_SPAWN_Z = 0.12 + 2 * BALL_RADIUS  # feet rest at the ball's apex
+BALL_SCALE = 0.5  # upstream action_scale for this task
+REWARD_BALL = {
+  "alive": 1.0,
+  "upright": 4.0,
+  "height": 1.5,
+  "ball": 3.0,
+  "pose": 0.5,
+  "rate": -0.5,
+  "limits": -5.0,
+  "contacts": -0.2,
+}
+OBS_DIM_BALL = 4 * 3 + 3 * 14
 GAMMA, LAMBDA, CLIP, ENT_COEF = 0.99, 0.95, 0.2, 0.005
 LR, LR_END, LR_TO = 1e-3, 5e-4, 1000
 EPOCHS, MINIBATCHES, LOG_STD, HIDDEN, SEED = 5, 4, np.log(0.5), 128, 0
 OUT = pathlib.Path(__file__).parent / "microduck_policy.pt"
+OUT_BALL = pathlib.Path(__file__).parent / "microduck_ball_policy.pt"
 
 
-def build_model(timestep=TIMESTEP, path=XML):
-  spec = mujoco.MjSpec.from_file(str(path))
+def _set_actuators(spec, timestep):
   spec.option.timestep = timestep
   for actuator in spec.actuators:
     actuator.set_to_position(kp=KP, kv=KD)
     actuator.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
     actuator.forcerange = [-FORCE_LIMIT, FORCE_LIMIT]
+  return spec
+
+
+def build_model(timestep=TIMESTEP, path=XML):
+  return _set_actuators(mujoco.MjSpec.from_file(str(path)), timestep).compile()
+
+
+def build_ball_model(timestep=TIMESTEP, path=BALL_XML):
+  """Robot, floor and the balance ball. Keyframes go: the ball's freejoint changes nq."""
+  spec = _set_actuators(mujoco.MjSpec.from_file(str(path)), timestep)
+  for key in list(spec.keys):
+    spec.delete(key)
+  ball = spec.worldbody.add_body(name="ball", pos=[0.0, 0.0, BALL_RADIUS])
+  ball.add_freejoint(name="ball_free")
+  ball.add_geom(
+    name="ball_geom",
+    type=mujoco.mjtGeom.mjGEOM_SPHERE,
+    size=[BALL_RADIUS],
+    mass=BALL_MASS,
+    friction=[1.0, 0.005, 0.0001],
+    condim=3,
+    rgba=[1.0, 0.55, 0.0, 1.0],
+  )
   return spec.compile()
+
+
+def stand_pose(timestep=TIMESTEP):
+  """The STAND keyframe's joint angles and actuator targets, from the walking model."""
+  key = build_model(timestep).key("STAND")
+  return key.qpos[7 : 7 + ACT_DIM].copy(), key.ctrl.copy()
 
 
 def progress(head, done, elapsed, tail, end=False):
@@ -85,8 +133,11 @@ def progress(head, done, elapsed, tail, end=False):
 
 
 class Duck:
-  def __init__(self, num_envs, seed=0, timestep=TIMESTEP):
-    self.batch = batch = Batch(build_model(timestep), num_envs)
+  obs_dim = OBS_DIM
+  rewards = REWARD
+
+  def __init__(self, num_envs, seed=0, timestep=TIMESTEP, model=None, stand=None):
+    self.batch = batch = Batch(model if model is not None else build_model(timestep), num_envs)
     self.num_envs = num_envs
     self.decimation = round(CTRL_DT / timestep)
     self.model = batch.model
@@ -96,12 +147,14 @@ class Duck:
     self.feet = [self.model.site(s).id for s in ("left_foot", "right_foot")]
     self.rot = self.xmat[:, self.trunk].reshape(-1, 3, 3)  # live view: world <- body
     self.foot = self.site[:, self.feet]  # (N, 2, 3)
-    key = self.model.key("STAND")
-    self.stand = np.zeros(self.model.nu, np.float32)
-    self.stand[:] = key.ctrl
+    self.stand_qpos, self.stand = stand if stand is not None else stand_pose(timestep)
+    self.keyframe = -1 if stand is not None else self.model.key("STAND").id
     self.joints = np.arange(7, 7 + ACT_DIM)  # free joint is qpos[0:7]
     self.dofs = np.arange(6, 6 + ACT_DIM)
-    self.lower, self.upper = 0.95 * self.model.jnt_range[1:, 0], 0.95 * self.model.jnt_range[1:, 1]
+    self.lower, self.upper = (
+      0.95 * self.model.jnt_range[1 : 1 + ACT_DIM, 0],
+      (0.95 * self.model.jnt_range[1 : 1 + ACT_DIM, 1]),
+    )
     self.rng = np.random.default_rng(seed)
     self.steps, self.clock = np.zeros(num_envs, np.int64), np.zeros(num_envs)
     self.action = np.zeros((num_envs, ACT_DIM), np.float32)
@@ -110,7 +163,7 @@ class Duck:
 
   def reset(self, ids):
     n = ids.size
-    self.batch.reset(ids, keyframe=self.model.key("STAND").id)  # writes must follow the reset
+    self.batch.reset(ids, keyframe=self.keyframe)  # writes must follow the reset
     self.qpos[np.ix_(ids, self.joints)] += self.rng.uniform(-0.05, 0.05, (n, ACT_DIM))
     self.qpos[ids, 2] += self.rng.uniform(0.0, 0.01, n)
     self.qvel[np.ix_(ids, np.arange(6, self.model.nv))] = self.rng.uniform(-0.2, 0.2, (n, self.model.nv - 6))
@@ -186,22 +239,116 @@ class Duck:
     return reward, fell | (self.steps >= EPISODE), fell, terms
 
 
+class BallBalance(Duck):
+  """The duck stands on a basketball and keeps it under its feet.
+
+  Port of Motphys MotrixLab's microduck-ball-balance reward and termination set: alive, upright,
+  base height at the balanced height, ball under the feet, default posture, action rate, joint
+  limits, undesired contacts. Episode ends on a low base, a real tilt, the ball rolling out, a
+  joint far from its default, or a joint spinning faster than 100 rad/s.
+  """
+
+  obs_dim = OBS_DIM_BALL
+  rewards = REWARD_BALL
+  BALL_QPOS, BALL_QVEL, EPISODE_BALL = 21, 20, 500  # 10 s at 50 Hz
+
+  def __init__(self, num_envs, seed=0, timestep=TIMESTEP, full=False):
+    super().__init__(
+      num_envs,
+      seed,
+      timestep,
+      model=build_ball_model(timestep, BALL_XML_FULL if full else BALL_XML),
+      stand=stand_pose(timestep),
+    )
+    self.ball = self.model.body("ball").id
+    self.cfrc = self.batch.bind("cfrc_ext")
+    feet = {self.model.body(f"ankle_{side}").id for side in ("left", "right")}
+    self.bad = [i for i in range(1, self.model.nbody) if i != self.ball and i not in feet]
+
+  def reset(self, ids):
+    n = ids.size
+    self.batch.reset(ids)  # writes must follow the reset
+    self.qpos[ids] = 0.0
+    self.qpos[ids, 2] = BASE_SPAWN_Z + self.rng.uniform(-0.005, 0.005, n)
+    self.qpos[ids, 3] = 1.0
+    self.qpos[np.ix_(ids, self.joints)] = self.stand_qpos + self.rng.uniform(-0.05, 0.05, (n, ACT_DIM))
+    self.qpos[ids, self.BALL_QPOS : self.BALL_QPOS + 2] = self.rng.uniform(-0.01, 0.01, (n, 2))
+    self.qpos[ids, self.BALL_QPOS + 2] = BALL_RADIUS
+    self.qpos[ids, self.BALL_QPOS + 3] = 1.0
+    self.qvel[ids] = self.rng.uniform(-0.05, 0.05, (n, self.model.nv))
+    self.steps[ids], self.action[ids] = 0, 0.0
+    self.batch.forward(ids)  # derived fields read by obs()
+
+  def obs(self):
+    rot = self.rot
+    to_ball = np.einsum(
+      "nji,nj->ni", rot, self.qpos[:, self.BALL_QPOS : self.BALL_QPOS + 3] - self.qpos[:, :3]
+    )
+    ball_vel = np.einsum("nji,nj->ni", rot, self.qvel[:, self.BALL_QVEL : self.BALL_QVEL + 3])
+    cols = (
+      -rot[:, 2],  # gravity in the base frame
+      0.25 * self.qvel[:, 3:6],
+      5.0 * to_ball,
+      0.5 * ball_vel,
+      self.qpos[:, self.joints] - self.stand_qpos,
+      0.05 * self.qvel[:, self.dofs],
+      self.action,
+    )
+    return np.concatenate(cols, 1, dtype=np.float32)
+
+  def step(self, action):
+    self.ctrl[:] = self.stand + BALL_SCALE * action
+    self.batch.step(nstep=self.decimation)
+    self.steps += 1
+    up, q, base_z = -self.rot[:, 2], self.qpos[:, self.joints], self.qpos[:, 2]
+    ball, feet_mid = self.qpos[:, self.BALL_QPOS : self.BALL_QPOS + 3], self.foot[:, :, :2].mean(1)
+    d_xy = np.linalg.norm(ball[:, :2] - feet_mid, axis=1)
+    tilt_sq = up[:, 0] ** 2 + up[:, 1] ** 2
+    centred = np.exp(-(tilt_sq + (up[:, 2] + 1.0) ** 2) / 0.2**2)  # upstream's upright error
+    lo, hi = self.model.jnt_range[1 : 1 + ACT_DIM, 0], self.model.jnt_range[1 : 1 + ACT_DIM, 1]
+    frac = np.abs(2.0 * (q - lo) / (hi - lo) - 1.0)  # 0 mid-range, 1 at a limit
+    terms = dict(
+      alive=np.ones(self.num_envs, np.float32),
+      upright=centred,
+      height=np.exp(-(((base_z - BASE_SPAWN_Z) / 0.05) ** 2)),
+      ball=np.exp(-((d_xy**2) / 0.05**2)),
+      pose=np.exp(-np.sum((q - self.stand_qpos) ** 2, 1) / ACT_DIM / 0.5**2),
+      rate=np.sum((action - self.action) ** 2, 1),
+      limits=np.clip((frac - 0.9) / 0.1, 0.0, 5.0).sum(1),
+      contacts=(np.linalg.norm(self.cfrc[:, self.bad, :3], axis=2) > 0.5).sum(1),
+    )
+    reward = np.asarray(sum(self.rewards[k] * v for k, v in terms.items()), np.float32)
+    self.action = action.astype(np.float32)
+    fell = (
+      (base_z < 0.22)
+      | (tilt_sq > 0.6**2)
+      | (d_xy > 0.20)
+      | (np.abs(q - self.stand_qpos).max(1) > 0.5)
+      | (np.linalg.norm(self.qvel[:, self.dofs], axis=1) > 100.0)
+    )
+    return reward, fell | (self.steps >= self.EPISODE_BALL), fell, terms
+
+
+TASKS = {"velocity": (Duck, OUT), "ball-balance": (BallBalance, OUT_BALL)}
+
+
 def log_density(z, log_std):
   return -0.5 * (z * z).sum(-1) - log_std.sum() - 0.5 * ACT_DIM * np.log(2 * np.pi)
 
 
-def mlp(out_dim):
-  hidden = (nn.Linear(OBS_DIM, HIDDEN), nn.ELU(), nn.Linear(HIDDEN, HIDDEN), nn.ELU())
+def mlp(out_dim, obs_dim):
+  hidden = (nn.Linear(obs_dim, HIDDEN), nn.ELU(), nn.Linear(HIDDEN, HIDDEN), nn.ELU())
   return nn.Sequential(*hidden, nn.Linear(HIDDEN, out_dim))
 
 
 class ActorCritic(nn.Module):
-  def __init__(self):
+  def __init__(self, obs_dim=OBS_DIM):
     super().__init__()
-    self.actor, self.critic = mlp(ACT_DIM), mlp(1)
+    self.obs_dim = obs_dim
+    self.actor, self.critic = mlp(ACT_DIM, obs_dim), mlp(1, obs_dim)
     self.log_std = nn.Parameter(torch.full((ACT_DIM,), LOG_STD))
-    self.register_buffer("mean", torch.zeros(OBS_DIM))
-    self.register_buffer("var", torch.ones(OBS_DIM))
+    self.register_buffer("mean", torch.zeros(obs_dim))
+    self.register_buffer("var", torch.ones(obs_dim))
     self.register_buffer("count", torch.full((), 1e-4))
 
   @torch.no_grad()
@@ -223,7 +370,7 @@ def rollout(actor, env):
   def policy(obs):
     return tuple(x.numpy() for x in actor(torch.as_tensor(obs)))
 
-  shapes = dict(obs=(OBS_DIM,), act=(ACT_DIM,), logp=(), val=(), rew=(), alive=())
+  shapes = dict(obs=(env.obs_dim,), act=(ACT_DIM,), logp=(), val=(), rew=(), alive=())
   buf = {k: np.empty((HORIZON, env.num_envs, *v), np.float32) for k, v in shapes.items()}
   means, falls, episodes = [], 0, 0
   obs = env.obs()
@@ -241,7 +388,7 @@ def rollout(actor, env):
       obs=obs, act=act, logp=log_density(noise, log_std), val=val, rew=reward, alive=~done
     ).items():
       buf[k][t] = v
-    means.append([terms[k].mean() for k in REWARD])
+    means.append([terms[k].mean() for k in env.rewards])
     ids = np.flatnonzero(done)
     if ids.size:
       episodes, falls = episodes + ids.size, falls + int(fell[ids].sum())
@@ -250,7 +397,7 @@ def rollout(actor, env):
     obs = next_obs
   batch = {k: torch.as_tensor(v) for k, v in buf.items()}
   batch["last_val"] = torch.as_tensor(policy(obs)[1])
-  stats = dict(zip(REWARD, np.mean(means, 0), strict=True))
+  stats = dict(zip(env.rewards, np.mean(means, 0), strict=True))
   stats["falls"] = falls / max(episodes, 1)
   return batch, stats
 
@@ -266,7 +413,7 @@ def gae(batch):
 
 
 def update(net, opt, batch, adv, ret):
-  obs, act = batch["obs"].reshape(-1, OBS_DIM), batch["act"].reshape(-1, ACT_DIM)
+  obs, act = batch["obs"].reshape(-1, net.obs_dim), batch["act"].reshape(-1, ACT_DIM)
   logp_old, adv, ret = batch["logp"].reshape(-1), adv.reshape(-1), ret.reshape(-1)
   adv = (adv - adv.mean()) / (adv.std() + 1e-8)
   for _ in range(EPOCHS):
@@ -283,15 +430,25 @@ def update(net, opt, batch, adv, ret):
   net.absorb(obs)  # after the epochs: the batch was collected under the old statistics
 
 
-def train(num_envs=NUM_ENVS, iterations=ITERS, out=OUT, timestep=TIMESTEP):
+def train(task="velocity", num_envs=NUM_ENVS, iterations=ITERS, out=None, timestep=TIMESTEP):
+  env = TASKS[task][0](num_envs, seed=SEED, timestep=timestep)
+  out = out or TASKS[task][1]
   torch.manual_seed(SEED)
-  env = Duck(num_envs, seed=SEED, timestep=timestep)
-  net = ActorCritic()
+  net = ActorCritic(env.obs_dim)
   opt = torch.optim.Adam(net.parameters(), LR)
   start = time.perf_counter()
 
   def save():
-    torch.save({"model": net.state_dict(), "obs_dim": OBS_DIM, "act_dim": ACT_DIM, "timestep": timestep}, out)
+    torch.save(
+      {
+        "model": net.state_dict(),
+        "obs_dim": env.obs_dim,
+        "act_dim": ACT_DIM,
+        "timestep": timestep,
+        "task": task,
+      },
+      out,
+    )
 
   try:
     for it in range(iterations):
@@ -299,13 +456,14 @@ def train(num_envs=NUM_ENVS, iterations=ITERS, out=OUT, timestep=TIMESTEP):
       batch, stats = rollout(net, env)
       update(net, opt, batch, *gae(batch))
       dt = time.perf_counter() - start
-      reward = sum(REWARD[k] * stats[k] for k in REWARD)
+      reward = sum(env.rewards[k] * stats[k] for k in env.rewards)
       steps_per_s = num_envs * HORIZON * (it + 1) / dt
       tail = f"{steps_per_s / 1e3:4.0f}k steps/s  reward {reward:6.2f}  "
-      tail += "  ".join(f"{k} {stats[k]:.2f}" for k in ("track", "turn", "falls"))
+      tail += "  ".join(f"{k} {stats[k]:.2f}" for k in list(env.rewards)[:5])
+      tail += f"  falls {stats['falls']:.2f}"
       progress(f"{it + 1:5d}/{iterations}", (it + 1) / iterations, dt, tail)
       if (it + 1) % 50 == 0 or it + 1 == iterations:
-        print(" " * 12 + "  ".join(f"{k} {REWARD[k] * stats[k]:6.2f}" for k in REWARD))
+        print(" " * 12 + "  ".join(f"{k} {env.rewards[k] * stats[k]:6.2f}" for k in env.rewards))
       if (it + 1) % 100 == 0 or it + 1 == iterations:
         save()
   except KeyboardInterrupt:
@@ -318,9 +476,10 @@ def train(num_envs=NUM_ENVS, iterations=ITERS, out=OUT, timestep=TIMESTEP):
 
 if __name__ == "__main__":
   ap = argparse.ArgumentParser()
+  ap.add_argument("--task", choices=("velocity", "ball-balance"), default="velocity")
   ap.add_argument("--num-envs", type=int, default=NUM_ENVS)
   ap.add_argument("--iterations", type=int, default=ITERS)
-  ap.add_argument("--out", type=pathlib.Path, default=OUT)
+  ap.add_argument("--out", type=pathlib.Path, default=None)
   ap.add_argument("--timestep", type=float, default=TIMESTEP, help="physics timestep, s")
   args = ap.parse_args()
-  train(args.num_envs, args.iterations, args.out, args.timestep)
+  train(args.task, args.num_envs, args.iterations, args.out, args.timestep)
