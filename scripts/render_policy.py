@@ -32,6 +32,8 @@ def main():
   ap.add_argument("--slowmo", type=float, default=1.0, help="playback slowdown factor")
   ap.add_argument("--command", default="0.4,0,0", help="forward m/s, sideways m/s, yaw rad/s")
   ap.add_argument("--distance", type=float, default=None)
+  ap.add_argument("--seed", type=int, default=0, help="environment reset seed")
+  ap.add_argument("--sample", action="store_true", help="sample actions instead of the policy mean")
   ap.add_argument(
     "--model",
     type=pathlib.Path,
@@ -61,7 +63,9 @@ def main():
 
   # obs/step bookkeeping; the rendered state comes from here
   env = (
-    T.BallBalance(1, timestep=timestep, full=True) if task == "ball-balance" else T.Duck(1, timestep=timestep)
+    T.BallBalance(1, seed=args.seed, timestep=timestep, full=True)
+    if task == "ball-balance"
+    else T.Duck(1, seed=args.seed, timestep=timestep)
   )
   if task == "ball-balance":
     data.qpos[:], data.qvel[:] = env.qpos[0], env.qvel[0]
@@ -89,16 +93,22 @@ def main():
 
   def act():
     with torch.no_grad():
-      action = net(torch.as_tensor(env.obs()))[0].numpy()[0]
-    env.until[:] = 1e9  # hold the command for the whole clip
-    env.ctrl[:] = env.stand + T.ACTION_SCALE * action
+      mean = net(torch.as_tensor(env.obs()))[0].numpy()[0]
+    action = (
+      mean + np.exp(net.log_std.detach().numpy()) * env.rng.standard_normal(mean.shape)
+      if args.sample
+      else mean
+    )
+    env.until[:] = 1e9  # hold the command for the whole clip (no-op for ball balance)
     return action
 
   steps = int(args.seconds * args.fps)
   if args.substeps <= 1:
     for _ in range(steps):
-      env.step(act()[None])
+      _, done, _, _ = env.step(act()[None])
       shoot()
+      if done.any():  # an episode ends where the environment says it does
+        break
   else:  # step the batch itself, sub-step by sub-step, so every rendered frame is a real state
     chunk = env.decimation // args.substeps
     assert chunk * args.substeps == env.decimation, "substeps must divide the decimation"

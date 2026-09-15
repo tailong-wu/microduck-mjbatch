@@ -4,7 +4,7 @@ Train the [Pollen Microduck](https://github.com/pollen-robotics/microduck) — a
 biped — with [mjbatch](https://github.com/kevinzakka/mjbatch): thousands of MuJoCo instances
 stepped in parallel on the CPU through a C++ thread pool, GIL released. No CUDA, no GPU.
 
-| walking | balancing on a ball |
+| walking (`velocity`, solved) | balancing on a ball (`ball-balance`, best-case seed) |
 |---|---|
 | ![Microduck walking](media/microduck_walk.gif) | ![Microduck balancing](media/microduck_ball.gif) |
 
@@ -23,7 +23,7 @@ Both tasks on 8 vCPU — the RTX 2080 Ti in this box was never used.
 | task | command | wall clock | policy | video |
 |---|---|---|---|---|
 | `velocity` | `--num-envs 4096 --iterations 1500` | **2 h 36 min** | `microduck_policy.pt` | `media/microduck_walk_1080p.mp4`, [slow motion](media/microduck_walk_slowmo_1080p.mp4) |
-| `ball-balance` | `--num-envs 4096 --iterations 800` | **1 h 29 min** | `microduck_ball_policy.pt` | `media/microduck_ball.mp4` |
+| `ball-balance` | `--num-envs 4096 --iterations 800` | **1 h 29 min** | `microduck_ball_policy.pt` | `media/microduck_ball_best.mp4` (10 s), `media/microduck_ball_typical.mp4` (2.2 s) |
 
 **`velocity`: solved.** Final reward 4.10, velocity tracking 0.95, zero falls. Asked for 0.3 m/s it
 walks 0.21 m/s steadily; asked for nothing it stands; asked to turn it turns in place.
@@ -37,8 +37,18 @@ episodes, 10 s cap:
 | hold the stand pose | 0.60 s | 0.64 s | 1.22 s | — |
 | trained policy | **2.03 s** | 4.12 s | 10.00 s (cap) | 5.1 cm |
 
-So it learns to stand on the ball and to catch it for a few seconds, not to keep it. The clip above
-is a lucky episode. Likely causes, untested: 800 iterations is short (upstream config asks for
+So it learns to stand on the ball and to catch it for a few seconds, not to keep it. The gif above
+is a best case: `--seed 8`, the duck balances the whole 10 s and the episode only ends on the
+episode cap. The other clip is the median case, `--seed 25`, which ends at 2.18 s because the ball
+reaches 0.20 m away from the midpoint of the feet and rolls out — the duck itself is still upright
+(tilt 0.000, base 0.393 m). Two different seeds, same policy, same command:
+
+```bash
+uv run scripts/render_policy.py --policy microduck_ball_policy.pt --seed 8  --seconds 10 --distance 1.3 --width 1920 --height 1080 --out media/microduck_ball_best.mp4
+uv run scripts/render_policy.py --policy microduck_ball_policy.pt --seed 25 --seconds 4  --distance 1.3 --width 1920 --height 1080 --out media/microduck_ball_typical.mp4
+```
+
+Likely causes for the gap, untested: 800 iterations is short (upstream config asks for
 20 000), the plain `kp=5` PD is slow at the ankle compared with the real motor model, and the ball
 carries 0.45 kg against a 0.74 kg duck.
 
@@ -104,7 +114,7 @@ microduck/lean/            same model without the visual meshes (4 STL) — trai
 scripts/vendor_mjcf.py     re-vendor from a microduck_rl checkout
 scripts/check_vendored.py  prove the stripping changed no physics
 scripts/render_policy.py   offscreen mp4 (or gif) of a checkpoint; --substeps for slow motion
-media/                     the trained gaits: gifs, 480p, 1080p, 1080p slow motion
+media/                     walking gif / 480p / 1080p / 1080p slow motion, ball-balance best + typical
 ```
 
 CPU-only environment: `uv sync` (torch from the PyTorch CPU index).
